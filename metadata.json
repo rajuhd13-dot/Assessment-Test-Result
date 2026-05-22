@@ -1,0 +1,6 @@
+{
+  "name": "Assessment Test Result",
+  "description": "HSC Roll No এবং Registration No দিয়ে আপনার মূল্যায়ন ফলাফল দেখুন",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
