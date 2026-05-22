@@ -111,6 +111,34 @@ export default function App() {
     });
   };
 
+  const diagnoseHtmlResponse = (html: string): string => {
+    const htmlLower = html.toLowerCase();
+    
+    if (htmlLower.includes("accounts.google.com") || htmlLower.includes("sign-in") || htmlLower.includes("signin") || htmlLower.includes("sign in") || htmlLower.includes("service login")) {
+      return "গুগল সাইন-ইন রিকোয়েস্ট সনাক্ত করা হয়েছে। অনুগ্রহ করে নিশ্চিত করুন আপনার Google Sheets এর Apps Script 'Deploy' বা 'Manage Deployments' সাবমিট করার সময় [Who has access] অপশনটি অবশ্যই 'Anyone' সেট করেছেন (গুগল অ্যাকাউন্টে লগইন থাকা বাধ্যতামূলক নয়)।";
+    }
+    
+    if (htmlLower.includes("authorization required") || htmlLower.includes("unauthorized") || htmlLower.includes("permission") || htmlLower.includes("need permission")) {
+      return "অনুমোদন বা পারমিশন (Authorization) লক করা রয়েছে। আপনার Google Sheets-এর Apps Script এডিটরে প্রবেশ করে doGet বা অন্য কোনো ফাংশন অন্তত একবার টেস্ট রান (Run) করুন এবং আপনার গুগল অ্যাকাউন্ট থেকে শীটটি রিড-রাইট করার ড্রাইভ সিকিউরিটি পারমিশন কনফার্ম করুন।";
+    }
+    
+    const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+    if (titleMatch) {
+      const titleVal = titleMatch[1].trim();
+      if (htmlLower.includes("script error") || titleVal.includes("Error") || titleVal.includes("ভুল")) {
+        return `গুগল অ্যাপস স্ক্রিপ্ট একটি ইন্টারনাল স্ক্রিপ্ট এরর বা এক্সিপশনের সম্মুখীন হয়েছে [বার্তা: "${titleVal}"]. এটি সাধারণত স্প্রেডশীট আইডি ভুল হলে, ডিলিট হলে, অথবা শিটের নাম ভুল হলে ঘটে। অনুগ্রহ করে আপনার Spreadsheet ID ও Sheet Name চেক করুন।`;
+      }
+      return `গুগল অ্যাপস স্ক্রিপ্ট থেকে সঠিক JSON তথ্য না এসে একটি HTML ডকুমেন্ট রিটার্ন এসেছে যার শিরোনাম "${titleVal}"। 
+
+সম্ভাব্য কারণ ও সমাধান:
+১. আপনি কোড আপডেট করলেও অ্যাপস স্ক্রিপ্টে "New Deployment" বা নতুন সংস্করণ ডেপ্লয় করেননি। কোড পরিবর্তন করার পর অবশ্যই Google Apps Script এডিটরে "Deploy" > "Manage Deployments" এ ক্লিক করে পেন্সিল আইকন চেপে "Version: New Version" সিলেক্ট করে পুনরায় deploy করুন।
+২. আপনার গুগল শীটের স্ক্রিপ্টটি এখনো পুরানো বা ভুল HTML রেসপন্স রিটার্ন করছে। অনুগ্রহ করে আমাদের ওয়েবসাইটের ওপরে ডানদিকের Settings (API URL) বাটন থেকে সর্বশেষ স্ক্রিপ্ট কোডটি কপি করে আপনার Google Sheet এর Extensions > Apps Script ফাইলে সম্পূর্ণ রিপ্লেস করুন এবং Deploy করুন।
+৩. ডেপ্লয়মেন্টের সময় এক্সেস লেভেল "Who has access: Anyone" সিলেক্ট করা হয়েছে কিনা তা নিশ্চিত করুন।`;
+    }
+    
+    return "অ্যাপস স্ক্রিপ্ট থেকে আনএক্সপেক্টেড HTML চলে এসেছে। অনুগ্রহ করে নিশ্চিত করুন যে আপনার গুগল শিটের কোডটি ঠিকভাবে পাবলিশ করা হয়েছে এবং 'Anyone' হিসেবে সচল এক্সেস রয়েছে।";
+  };
+
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setStatusMessage(null);
@@ -129,20 +157,78 @@ export default function App() {
     setLoading(true);
 
     try {
-      // Fetch from internal Express API proxy
-      const params = new URLSearchParams({
-        roll: trimmedRoll,
-        reg: trimmedReg,
-        scriptUrl: scriptUrl.trim()
-      });
+      let data: SearchResult | null = null;
+      let apiProxyFailed = false;
 
-      const response = await fetch(`/api/search?${params.toString()}`);
-      const data: SearchResult = await response.json();
+      // 1. Try to fetch from internal Express API proxy first (Works perfectly on our sandboxed system/Cloud Run custom server)
+      try {
+        const params = new URLSearchParams({
+          roll: trimmedRoll,
+          reg: trimmedReg,
+          scriptUrl: scriptUrl.trim()
+        });
+        const response = await fetch(`/api/search?${params.toString()}`);
+        if (response.ok) {
+          const contentType = response.headers.get("content-type");
+          if (contentType && contentType.includes("application/json")) {
+            data = await response.json();
+          } else {
+            console.warn("[API PROXY] Non-JSON payload received. Node backend proxy not active or Vercel static router matching.");
+            apiProxyFailed = true;
+          }
+        } else {
+          apiProxyFailed = true;
+        }
+      } catch (proxyErr) {
+        console.warn("[API PROXY FAILURE] Express proxy failed. Running client-side direct fallback...", proxyErr);
+        apiProxyFailed = true;
+      }
 
-      if (!response.ok || !data.ok) {
+      // 2. Direct Fallback: Pure Client-Side Fetch (Crucial for Vercel Static deployment where Express /api/ is missing)
+      if (apiProxyFailed || !data) {
+        console.log("[FALLBACK ACTIVE] Querying Google Apps Script endpoint direct from browser.");
+        let finalScriptUrlStr = scriptUrl.trim();
+        if (!finalScriptUrlStr || finalScriptUrlStr.includes("YOUR_SCRIPT_ID") || !finalScriptUrlStr.includes("script.google.com")) {
+          finalScriptUrlStr = "https://script.google.com/macros/s/AKfycbz-Ff2M_ntfcDSnCx-wnze_0TlmuS0OJ2TzBNwoo6ZalE_I0fSHm7z4PlGQGr6cIBb0Wg/exec";
+        }
+
+        const directUrl = new URL(finalScriptUrlStr);
+        directUrl.searchParams.set("action", "search");
+        directUrl.searchParams.set("roll", trimmedRoll);
+        directUrl.searchParams.set("reg", trimmedReg);
+
+        const response = await fetch(directUrl.toString(), {
+          method: "GET",
+          headers: {
+            "Accept": "application/json"
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`Google Apps Script API responded with status code ${response.status}`);
+        }
+
+        const rawText = await response.text();
+        const trimmedText = rawText.trim();
+
+        if (trimmedText.startsWith("<") || trimmedText.toLowerCase().includes("<!doctype")) {
+          // Received HTML instead of JSON
+          const errorMsg = diagnoseHtmlResponse(trimmedText);
+          setStatusMessage({
+            text: errorMsg,
+            type: "error"
+          });
+          setResult(null);
+          return;
+        }
+
+        data = JSON.parse(trimmedText);
+      }
+
+      if (!data || !data.ok) {
         setResult(null);
         setStatusMessage({
-          text: data.message || "কোনো ফলাফল পাওয়া যায়নি। সঠিক নম্বর দিন।",
+          text: data?.message || "কোনো ফলাফল পাওয়া যায়নি। সঠিক নম্বর দিন।",
           type: "error"
         });
       } else if (data.data) {
@@ -150,12 +236,21 @@ export default function App() {
         setStatusMessage(null);
       }
     } catch (err: any) {
-      console.error(err);
+      console.error("[CATCH SEARCH ERROR]", err);
       setResult(null);
-      setStatusMessage({
-        text: "সার্ভার সংযোগ ব্যর্থ হয়েছে। পুনরায় চেষ্টা করুন।",
-        type: "error"
-      });
+      
+      const errorStr = String(err.message || err);
+      if (errorStr.includes("Failed to fetch")) {
+        setStatusMessage({
+          text: "বাউজার সরাসরি গুগল এপিআই কল করতে ব্যর্থ হয়েছে। অনুগ্রহ করে আপনার নেটওয়ার্ক সংযোগ যাচাই করুন অথবা নিশ্চিত করুন যে আপনার Apps Script এক্সেস 'Anyone' দিয়ে সচল আছে।",
+          type: "error"
+        });
+      } else {
+        setStatusMessage({
+          text: `সার্ভার সংযোগে ব্যর্থতা: ${errorStr}`,
+          type: "error"
+        });
+      }
     } finally {
       setLoading(false);
     }
