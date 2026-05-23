@@ -198,10 +198,7 @@ export default function App() {
         directUrl.searchParams.set("reg", trimmedReg);
 
         const response = await fetch(directUrl.toString(), {
-          method: "GET",
-          headers: {
-            "Accept": "application/json"
-          }
+          method: "GET"
         });
 
         if (!response.ok) {
