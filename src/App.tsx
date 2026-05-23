@@ -18,6 +18,7 @@ import {
   FileText
 } from "lucide-react";
 import { SearchResult, SearchData } from "./types";
+import { mapLocalRow } from "./clientMapping";
 
 // Typewriter hook for placeholders
 function useTypewriter(text: string, active: boolean) {
@@ -82,16 +83,99 @@ export default function App() {
   const [showNoticeModal, setShowNoticeModal] = useState(false);
   const [copiedSetting, setCopiedSetting] = useState(false);
 
+  // Hidden Admin Configuration to hide settings button from general public
+  const [isAdmin, setIsAdmin] = useState(() => {
+    try {
+      if (typeof window !== "undefined") {
+        const saved = localStorage.getItem("IS_ADMIN_MODE");
+        if (saved === "true") return true;
+
+        const params = new URLSearchParams(window.location.search);
+        if (params.has("admin") || params.has("settings") || params.has("config")) {
+          localStorage.setItem("IS_ADMIN_MODE", "true");
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  });
+  const [headerClicks, setHeaderClicks] = useState(0);
+
+  const handleHeaderClick = () => {
+    setHeaderClicks((prev) => {
+      const next = prev + 1;
+      if (next >= 5) {
+        setIsAdmin(true);
+        localStorage.setItem("IS_ADMIN_MODE", "true");
+        setShowSettings(true);
+        return 0;
+      }
+      return next;
+    });
+  };
+
+  // Local high-speed client-side database state
+  const [clientDb, setClientDb] = useState<any[][] | null>(() => {
+    try {
+      const cached = localStorage.getItem("CLIENT_DB_CACHE");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          console.log("[INIT CACHE RESCUE] Instant database cache recovered in state lines:", parsed.length);
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn("Could not load client database cache:", e);
+    }
+    return null;
+  });
+
+  const syncClientDb = async (urlStr: string) => {
+    try {
+      let targetUrlStr = urlStr.trim();
+      if (!targetUrlStr || targetUrlStr.includes("YOUR_SCRIPT_ID") || !targetUrlStr.includes("script.google.com")) {
+        targetUrlStr = "https://script.google.com/macros/s/AKfycbz-Ff2M_ntfcDSnCx-wnze_0TlmuS0OJ2TzBNwoo6ZalE_I0fSHm7z4PlGQGr6cIBb0Wg/exec";
+      }
+
+      const syncUrl = new URL(targetUrlStr);
+      syncUrl.searchParams.set("action", "sync");
+
+      console.log("[CLIENT INSTANT SYNC] Requesting sync action directly to browser:", syncUrl.toString());
+      const response = await fetch(syncUrl.toString(), {
+        method: "GET"
+      });
+
+      if (response.ok) {
+        const rawText = await response.text();
+        const trimmed = rawText.trim();
+        if (trimmed && !trimmed.startsWith("<")) {
+          const resultObj = JSON.parse(trimmed);
+          if (resultObj && resultObj.ok && Array.isArray(resultObj.data)) {
+            console.log("[CLIENT INSTANT SYNC SUCCESS] Loaded rows count in browser memory:", resultObj.data.length);
+            setClientDb(resultObj.data);
+            localStorage.setItem("CLIENT_DB_CACHE", JSON.stringify(resultObj.data));
+            localStorage.setItem("CLIENT_DB_CACHE_LAST_SYNCED", String(Date.now()));
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[CLIENT INSTANT SYNC FAIL] Direct browser fetch failed. Using existing local/Vercel API caches.", err);
+    }
+  };
+
   const triggerPreload = () => {
     const params = new URLSearchParams({
       scriptUrl: scriptUrl.trim()
     });
     fetch(`/api/preload?${params.toString()}`).catch(() => {});
+    syncClientDb(scriptUrl).catch(() => {});
   };
 
   // Proactively warm up the database cache to make searching instantly fast (under 0.1s - 0.4s)
   useEffect(() => {
     triggerPreload();
+    syncClientDb(scriptUrl);
   }, [scriptUrl]);
 
   // Typewriter effects for placeholders
@@ -157,6 +241,33 @@ export default function App() {
     setLoading(true);
 
     try {
+      // 0. High-Speed CLIENT-SIDE Instant Lookup (Matches instantly!)
+      if (clientDb && clientDb.length > 0) {
+        console.log("[CLIENT INSTANT LOOKUP] Searching in client cache:", trimmedRoll, trimmedReg);
+        const HSC_ROLL_IDX = 28 - 1;
+        const HSC_REG_IDX = 29 - 1;
+
+        const matchedRow = clientDb.find((row) => {
+          const rRoll = row[HSC_ROLL_IDX];
+          const rReg = row[HSC_REG_IDX];
+          return (
+            rRoll !== undefined && rRoll !== null && String(rRoll).trim() === trimmedRoll &&
+            rReg !== undefined && rReg !== null && String(rReg).trim() === trimmedReg
+          );
+        });
+
+        if (matchedRow) {
+          console.log("[CLIENT CACHE HIT] Result found instantly in 0.5ms!");
+          const mapped = mapLocalRow(matchedRow);
+          setResult(mapped);
+          setStatusMessage(null);
+          setLoading(false);
+          // Trigger automatic silent cache revalidation in background
+          syncClientDb(scriptUrl).catch(() => {});
+          return;
+        }
+      }
+
       let data: SearchResult | null = null;
       let apiProxyFailed = false;
 
@@ -658,16 +769,18 @@ function onEdit(e) {
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-6 transition-all print:p-0 print:bg-white selection:bg-blue-100 selection:text-blue-900">
       
-      {/* Settings Panel & Toggle Button */}
-      <div className="fixed top-4 right-4 z-40 print:hidden">
-        <button
-          onClick={() => setShowSettings(!showSettings)}
-          className="flex items-center gap-1.5 bg-white/90 hover:bg-white backdrop-blur border border-slate-200 hover:border-slate-300 text-slate-700 shadow-sm transition-all rounded-full px-3.5 py-1.5 text-sm font-semibold cursor-pointer"
-        >
-          <Settings className="w-4 h-4 animate-spin-hover" />
-          Settings (API URL)
-        </button>
-      </div>
+      {/* Settings Panel & Toggle Button (Shown ONLY in Admin Mode) */}
+      {isAdmin && (
+        <div className="fixed top-4 right-4 z-40 print:hidden">
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className="flex items-center gap-1.5 bg-white/90 hover:bg-white backdrop-blur border border-slate-200 hover:border-slate-300 text-slate-700 shadow-sm transition-all rounded-full px-3.5 py-1.5 text-sm font-semibold cursor-pointer animate-pulse-once"
+          >
+            <Settings className="w-4 h-4 animate-spin-hover text-indigo-600" />
+            <span className="text-slate-800">Settings (API URL)</span>
+          </button>
+        </div>
+      )}
 
       {/* Settings Modal Dialog */}
       <AnimatePresence>
@@ -787,7 +900,11 @@ function onEdit(e) {
             transition={{ duration: 0.5 }}
             className="relative z-10"
           >
-            <h1 className="text-2xl md:text-3xl font-black tracking-tight mb-1 drop-shadow-md font-display">
+            <h1 
+              onClick={handleHeaderClick}
+              className="text-2xl md:text-3xl font-black tracking-tight mb-1 drop-shadow-md font-display cursor-default select-none active:scale-98 transition-transform"
+              title="Assessment Test Result"
+            >
               Assessment Test Result
             </h1>
             <p className="text-xs md:text-sm font-medium opacity-90 max-w-xl mx-auto">
